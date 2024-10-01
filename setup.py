@@ -1,24 +1,24 @@
 from setuptools import setup
 
-__version__ = '2.2.0'
+__version__ = "2.2.1"
 
 setup(
-    name='pyialarm',
+    name="pyialarm",
     py_modules=["pyialarm"],
     version=__version__,
-    description='A simple library to interface with iAlarm systems, built for use with Home-Assistant',
-    author='Ludovico de Nittis',
-    author_email='aasonykk+pyialarm@gmail.com',
-    url='https://github.com/RyuzakiKK/pyialarm',
-    download_url='https://github.com/RyuzakiKK/pyialarm',
-    license='Apache 2.0',
+    description="A simple library to interface with iAlarm systems, built for use with Home-Assistant",
+    author="Ludovico de Nittis",
+    author_email="aasonykk+pyialarm@gmail.com",
+    url="https://github.com/RyuzakiKK/pyialarm",
+    download_url="https://github.com/RyuzakiKK/pyialarm",
+    license="Apache 2.0",
     classifiers=[
-      'Development Status :: 4 - Beta',
-      'Intended Audience :: Developers',
-      'Programming Language :: Python :: 3',
+        "Development Status :: 4 - Beta",
+        "Intended Audience :: Developers",
+        "Programming Language :: Python :: 3",
     ],
-    keywords=['ialarm', 'antifurtocasa365', 'alarm'],
-    packages=['pyialarm'],
+    keywords=["ialarm", "antifurtocasa365", "alarm"],
+    packages=["pyialarm"],
     include_package_data=True,
-    install_requires=['dicttoxml2', 'xmltodict'],
+    install_requires=["dicttoxml2", "xmltodict"],
 )

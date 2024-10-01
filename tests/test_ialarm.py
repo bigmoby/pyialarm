@@ -1,0 +1,246 @@
+import pytest
+from unittest.mock import patch, AsyncMock, MagicMock
+from pyialarm import IAlarm
+from pyialarm.const import StatusType
+
+
+@pytest.mark.asyncio
+async def test_ensure_connection_is_open():
+    with patch("socket.socket") as mock_socket, patch(
+        "asyncio.get_event_loop"
+    ) as mock_event_loop:
+        mock_socket_instance = MagicMock()
+        mock_socket.return_value = mock_socket_instance
+        mock_socket_instance.fileno.return_value = -1
+        mock_socket_instance.setblocking.side_effect = lambda x: None
+
+        mock_event_loop_instance = MagicMock()
+        mock_event_loop.return_value = mock_event_loop_instance
+        mock_event_loop_instance.sock_connect = AsyncMock()
+
+        ialarm = IAlarm("192.168.1.81")
+        await ialarm.ensure_connection_is_open()
+
+        mock_socket_instance.setblocking.assert_called_once_with(False)
+        mock_event_loop_instance.sock_connect.assert_awaited_once_with(
+            mock_socket_instance, ("192.168.1.81", 18034)
+        )
+
+
+@pytest.mark.asyncio
+async def test_receive():
+    ialarm = IAlarm("192.168.1.81")
+
+    with patch("socket.socket") as mock_socket:
+        mock_socket_instance = mock_socket.return_value
+        mock_socket_instance.fileno.return_value = 1
+        mock_socket_instance.setblocking.side_effect = lambda x: None
+        ialarm.sock = mock_socket_instance
+
+        with patch("asyncio.get_event_loop") as mock_event_loop:
+            mock_event_loop_instance = mock_event_loop.return_value
+            mock_event_loop_instance.sock_recv = AsyncMock(
+                return_value=b"@ieM00020000<Root><Data>Mocked XML Data</Data></Root>"
+            )
+
+            with patch.object(
+                ialarm,
+                "_xor",
+                return_value=b"<Root><Data>Mocked XML Data</Data></Root>",
+            ) as mock_xor:
+                # Test della funzione _receive
+                response = await ialarm._receive()
+                mock_xor.assert_called_once()
+
+                assert response == {"Root": {"Data": "Mocked XML Data"}}
+
+
+@pytest.mark.parametrize(
+    "response, path, expected",
+    [
+        ({"Root": {"Host": {"DevStatus": "0"}}}, "/Root/Host/DevStatus", "0"),
+        (
+            {"Root": {"Host": {"Devices": ["Dev1", "Dev2"]}}},
+            "/Root/Host/Devices/1",
+            "Dev2",
+        ),
+        ({"Root": {"Host": {}}}, "/Root/Host/NonExistent", None),
+        (
+            {"Root": {"Host": {"Status": {"State": "armed"}}}},
+            "/Root/Host/Status/State",
+            "armed",
+        ),
+    ],
+)
+def test_clean_response_dict(response, path, expected):
+    ialarm = IAlarm("192.168.1.81")
+    result = ialarm._clean_response_dict(response, path)
+    assert result == expected
+
+
+def test_xor():
+    input_data = bytearray(b"<Err>TEST</Err>")
+    expected_output = bytearray(b"0}<<\\lh1Z\x04a\x0b6J\x13")
+
+    result = IAlarm._xor(input_data)
+
+    assert result == expected_output
+
+
+@pytest.mark.asyncio
+async def test_get_mac():
+    with patch.object(
+        IAlarm, "_send_request", new_callable=AsyncMock
+    ) as mock_send_request:
+        ialarm = IAlarm("192.168.1.81")
+        mock_send_request.return_value = {"Mac": "00:1A:2B:3C:4D:5E"}
+
+        mac = await ialarm.get_mac()
+
+        mock_send_request.assert_awaited_once()
+        assert mac == "00:1A:2B:3C:4D:5E"
+
+
+@pytest.mark.asyncio
+async def test_get_status_connection_error():
+    ialarm = IAlarm("192.168.1.81")
+    ialarm._send_request = AsyncMock(return_value=None)
+
+    with pytest.raises(
+        ConnectionError, match="An error occurred trying to connect to the alarm system"
+    ):
+        await ialarm.get_status()
+
+
+@pytest.mark.asyncio
+async def test_get_status_unexpected_reply():
+    ialarm = IAlarm("192.168.1.81")
+    ialarm._send_request = AsyncMock(return_value={"DevStatus": -1})
+
+    with pytest.raises(
+        ConnectionError, match="Received an unexpected reply from the alarm"
+    ):
+        await ialarm.get_status()
+
+
+@pytest.mark.asyncio
+async def test_get_status_triggered_alarm():
+    ialarm = IAlarm("192.168.1.81")
+    ialarm._send_request = AsyncMock(return_value={"DevStatus": ialarm.ARMED_AWAY})
+
+    zone_status_mock = [
+        {"types": [StatusType.ZONE_ALARM]},
+    ]
+    ialarm.get_zone_status = AsyncMock(return_value=zone_status_mock)
+
+    status = await ialarm.get_status()
+    assert status == ialarm.TRIGGERED
+
+
+@pytest.mark.asyncio
+async def test_get_status_no_triggered_alarm():
+    ialarm = IAlarm("192.168.1.81")
+    ialarm._send_request = AsyncMock(return_value={"DevStatus": ialarm.ARMED_AWAY})
+
+    zone_status_mock = [
+        {"types": []},
+    ]
+    ialarm.get_zone_status = AsyncMock(return_value=zone_status_mock)
+
+    status = await ialarm.get_status()
+    assert status == ialarm.ARMED_AWAY
+
+
+@pytest.mark.asyncio
+async def test_get_status_not_armed():
+    ialarm = IAlarm("192.168.1.81")
+    ialarm._send_request = AsyncMock(return_value={"DevStatus": 0})
+
+    zone_status_mock = [
+        {"types": []},
+    ]
+    ialarm.get_zone_status = AsyncMock(return_value=zone_status_mock)
+
+    status = await ialarm.get_status()
+    assert status == 0
+
+
+@pytest.mark.asyncio
+async def test_get_zone_status_success():
+    ialarm = IAlarm("192.168.1.81")
+
+    ialarm.get_zone = AsyncMock(
+        return_value=[
+            {"zone_id": 1, "name": "Zone 1", "type": 1, "voice": 0, "bell": False},
+            {"zone_id": 2, "name": "Zone 2", "type": 1, "voice": 0, "bell": False},
+        ]
+    )
+
+    ialarm._send_request_list = AsyncMock(
+        return_value=[
+            StatusType.ZONE_IN_USE | StatusType.ZONE_ALARM,
+            StatusType.ZONE_BYPASS,
+        ]
+    )
+
+    expected_result = [
+        {
+            "zone_id": 1,
+            "name": "Zone 1",
+            "types": [StatusType.ZONE_IN_USE, StatusType.ZONE_ALARM],
+        },
+        {"zone_id": 2, "name": "Zone 2", "types": [StatusType.ZONE_BYPASS]},
+    ]
+
+    result = await ialarm.get_zone_status()
+    assert result == expected_result
+
+
+@pytest.mark.asyncio
+async def test_get_zone_status_no_zones():
+    ialarm = IAlarm("192.168.1.81")
+
+    ialarm.get_zone = AsyncMock(return_value=[])
+
+    ialarm._send_request_list = AsyncMock(return_value=[])
+
+    result = await ialarm.get_zone_status()
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_zone_status_connection_error():
+    ialarm = IAlarm("192.168.1.81")
+
+    ialarm.get_zone = AsyncMock(
+        return_value=[
+            {"zone_id": 1, "name": "Zone 1"},
+        ]
+    )
+
+    ialarm._send_request_list = AsyncMock(return_value=None)
+
+    with pytest.raises(
+        ConnectionError, match="An error occurred trying to connect to the alarm system"
+    ):
+        await ialarm.get_zone_status()
+
+
+@pytest.mark.asyncio
+async def test_get_zone_status_no_status():
+    ialarm = IAlarm("192.168.1.81")
+
+    ialarm.get_zone = AsyncMock(
+        return_value=[
+            {"zone_id": 1, "name": "Zone 1"},
+        ]
+    )
+
+    ialarm._send_request_list = AsyncMock(return_value=[0])
+
+    expected_result = [
+        {"zone_id": 1, "name": "Zone 1", "types": [StatusType.ZONE_NOT_USED]},
+    ]
+
+    result = await ialarm.get_zone_status()
+    assert result == expected_result
