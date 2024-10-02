@@ -12,3 +12,7 @@ Thanks to https://github.com/wildstray/meian-client for writing down the API spe
 Please run before creating a PR:
 
 `pre-commit run --all-files`
+
+and 
+
+`pytest -vv tests/test_ialarm.py `
