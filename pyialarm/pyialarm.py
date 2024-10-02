@@ -1,7 +1,6 @@
 import asyncio
 from collections import OrderedDict
 import contextlib
-from datetime import datetime
 import logging
 import re
 import socket
@@ -10,17 +9,20 @@ from typing import Any, Optional
 import dicttoxml2
 import xmltodict
 
-from .const import (
+from pyialarm.const import (
     ALARM_TYPE_MAP,
     EVENT_TYPE_MAP,
     ZONE_TYPE_MAP,
     LogEntryType,
+    LogEntryTypeRaw,
     SirenSoundTypeEnum,
     StatusType,
     ZoneStatusType,
     ZoneType,
     ZoneTypeEnum,
+    ZoneTypeRaw,
 )
+from pyialarm.util import decode_name, parse_bell, parse_time
 
 log = logging.getLogger(__name__)
 # dicttoxml is very verbose at INFO level
@@ -183,7 +185,7 @@ class IAlarm:
     async def get_zone_status(self) -> list[ZoneStatusType]:
         zones: list[ZoneType] = await self.get_zone()
 
-        zone_name_map = {zone["Zone_id"]: zone["Name"] for zone in zones}
+        zone_name_map = {zone["zone_id"]: zone["name"] for zone in zones}
 
         command: OrderedDict[str, Optional[Any]] = OrderedDict()
         command["Total"] = None
@@ -223,9 +225,9 @@ class IAlarm:
             zone_name = zone_name_map.get(zone_id, "Unknown")
 
             zone_item: ZoneStatusType = {
-                "Zone_id": zone_id,
-                "Name": zone_name,
-                "Types": status_list,
+                "zone_id": zone_id,
+                "name": zone_name,
+                "types": status_list,
             }
             result.append(zone_item)
 
@@ -252,7 +254,7 @@ class IAlarm:
         if status in {self.ARMED_AWAY, self.ARMED_STAY}:
             zone_status: list[ZoneStatusType] = await self.get_zone_status()
             zone_alarm = any(
-                StatusType.ZONE_ALARM in zone["Types"] for zone in zone_status
+                StatusType.ZONE_ALARM in zone["types"] for zone in zone_status
             )
 
             if zone_alarm:
@@ -267,52 +269,33 @@ class IAlarm:
         command["Ln"] = None
         command["Err"] = None
 
-        event_log: list[Any] = await self._send_request_list(
+        event_log_raw: list[LogEntryTypeRaw] = await self._send_request_list(
             "/Root/Host/GetLog", command
         )
 
-        for event in event_log:
-            if "DTA,19" in event["Time"]:
-                try:
-                    time_str = event["Time"].split("|")[1]
-                    time_value = datetime.strptime(time_str, "%Y.%m.%d.%H.%M.%S")
-                    event["Time"] = time_value
-                except (ValueError, IndexError):
-                    event["Time"] = event["Time"]
-
-            if "GBA" in event["Name"]:
-                try:
-                    name_decoded = bytes.fromhex(event["Name"].split("|")[1]).decode(
-                        "utf-8", errors="ignore"
-                    )
-                    event["Name"] = name_decoded
-                except (ValueError, IndexError):
-                    event["Name"] = event["Name"]
-
-            event["Event"] = EVENT_TYPE_MAP.get(event["Event"], event["Event"])
-
-        return event_log
-
-    def __extract_zones(self, zone_data: list[ZoneType]) -> list[ZoneType]:
-        zones = []
-        for i, zone in enumerate(zone_data, start=1):
-            name_decoded = ""
-            if "GBA" in zone["Name"]:
-                try:
-                    name_decoded = bytes.fromhex(zone["Name"].split("|")[1]).decode(
-                        "utf-8", errors="ignore"
-                    )
-                except (ValueError, IndexError):
-                    name_decoded = zone["Name"]
-            zone_item = ZoneType(
-                Zone_id=i,
-                Type=zone["Type"],
-                Voice=zone["Voice"],
-                Name=name_decoded,
-                Bell=zone["Bell"],
+        logs = [
+            LogEntryType(
+                time=parse_time(event["Time"]),
+                area=event["Area"],
+                event=EVENT_TYPE_MAP.get(event["Event"], event["Event"]),
+                name=decode_name(event["Name"]),
             )
-            zones.append(zone_item)
-        return zones
+            for event in event_log_raw
+        ]
+
+        return logs
+
+    def __extract_zones(self, zone_data_raw: list[ZoneTypeRaw]) -> list[ZoneType]:
+        return [
+            ZoneType(
+                zone_id=i,
+                type=zone["Type"],
+                voice=zone["Voice"],
+                name=decode_name(zone["Name"]),
+                bell=parse_bell(zone["Bell"]),
+            )
+            for i, zone in enumerate(zone_data_raw, start=1)
+        ]
 
     async def get_zone(self) -> list[ZoneType]:
         command: OrderedDict[str, Optional[Any]] = OrderedDict()
@@ -321,8 +304,9 @@ class IAlarm:
         command["Ln"] = None
         command["Err"] = None
 
-        raw_zone_data = await self._send_request_list("/Root/Host/GetZone", command)
-
+        raw_zone_data: list[ZoneTypeRaw] = await self._send_request_list(
+            "/Root/Host/GetZone", command
+        )
         zone: list[ZoneType] = self.__extract_zones(raw_zone_data)
 
         return zone

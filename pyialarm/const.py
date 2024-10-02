@@ -2,11 +2,18 @@
 
 from datetime import datetime
 from enum import Enum, IntEnum
-from typing import TypedDict
+from typing import Optional, TypedDict
 
 
 class LogEntryType(TypedDict):
-    Time: datetime
+    time: Optional[datetime]
+    area: int
+    event: str
+    name: str
+
+
+class LogEntryTypeRaw(TypedDict):
+    Time: str
     Area: int
     Event: str
     Name: str
@@ -89,9 +96,9 @@ class StatusType(IntEnum):
 
 
 class ZoneStatusType(TypedDict):
-    Zone_id: int
-    Name: str
-    Types: list[StatusType]
+    zone_id: int
+    name: str
+    types: list[StatusType]
 
 
 class ZoneTypeEnum(str, Enum):
@@ -147,8 +154,15 @@ ALARM_TYPE_MAP = {
 
 
 class ZoneType(TypedDict):
-    Zone_id: int
+    zone_id: int
+    type: int
+    voice: int
+    name: str
+    bell: bool
+
+
+class ZoneTypeRaw(TypedDict):
     Type: int
     Voice: int
     Name: str
-    Bell: bool
+    Bell: str

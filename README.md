@@ -13,6 +13,6 @@ Please run before creating a PR:
 
 `pre-commit run --all-files`
 
-and 
+and
 
 `pytest -vv tests/test_ialarm.py `

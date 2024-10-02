@@ -1,4 +1,5 @@
 # mypy: ignore-errors
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -202,8 +203,8 @@ async def test_get_zone_status_success():
 
     ialarm.get_zone = AsyncMock(
         return_value=[
-            {"Zone_id": 1, "Name": "Zone 1", "Type": 1, "Voice": 0, "Bell": False},
-            {"Zone_id": 2, "Name": "Zone 2", "Type": 1, "Voice": 0, "Bell": False},
+            {"zone_id": 1, "name": "Zone 1", "type": 1, "voice": 0, "bell": False},
+            {"zone_id": 2, "name": "Zone 2", "type": 1, "voice": 0, "bell": False},
         ]
     )
 
@@ -216,11 +217,11 @@ async def test_get_zone_status_success():
 
     expected_result = [
         {
-            "Zone_id": 1,
-            "Name": "Zone 1",
-            "Types": [StatusType.ZONE_IN_USE, StatusType.ZONE_ALARM],
+            "zone_id": 1,
+            "name": "Zone 1",
+            "types": [StatusType.ZONE_IN_USE, StatusType.ZONE_ALARM],
         },
-        {"Zone_id": 2, "Name": "Zone 2", "Types": [StatusType.ZONE_BYPASS]},
+        {"zone_id": 2, "name": "Zone 2", "types": [StatusType.ZONE_BYPASS]},
     ]
 
     result = await ialarm.get_zone_status()
@@ -245,7 +246,7 @@ async def test_get_zone_status_connection_error():
 
     ialarm.get_zone = AsyncMock(
         return_value=[
-            {"Zone_id": 1, "Name": "Zone 1"},
+            {"zone_id": 1, "name": "Zone 1"},
         ]
     )
 
@@ -263,15 +264,51 @@ async def test_get_zone_status_no_status():
 
     ialarm.get_zone = AsyncMock(
         return_value=[
-            {"Zone_id": 1, "Name": "Zone 1"},
+            {"zone_id": 1, "name": "Zone 1"},
         ]
     )
 
     ialarm._send_request_list = AsyncMock(return_value=[0])
 
     expected_result = [
-        {"Zone_id": 1, "Name": "Zone 1", "Types": [StatusType.ZONE_NOT_USED]},
+        {"zone_id": 1, "name": "Zone 1", "types": [StatusType.ZONE_NOT_USED]},
     ]
 
     result = await ialarm.get_zone_status()
     assert result == expected_result
+
+
+@pytest.mark.asyncio
+async def test_get_log():
+    event_log_raw = [
+        {
+            "Time": "DTA,19|2023.10.01.12.30.45",
+            "Area": 1,
+            "Event": "001",
+            "Name": "GBA,16|4D6F636B",
+        },
+        {
+            "Time": "DTA,19|2023.10.01.12.35.50",
+            "Area": 2,
+            "Event": "002",
+            "Name": "GBA,16|4E616D65",
+        },
+    ]
+
+    event_type_map = {"001": "Event One", "002": "Event Two"}
+
+    with (
+        patch.object(
+            IAlarm, "_send_request_list", AsyncMock(return_value=event_log_raw)
+        ),
+        patch("pyialarm.const.EVENT_TYPE_MAP", event_type_map),
+    ):
+        ialarm = IAlarm("192.168.1.81")
+        logs = await ialarm.get_log()
+
+        assert len(logs) == 2
+        assert logs[0]["time"] == datetime(2023, 10, 1, 12, 30, 45)
+        assert logs[0]["event"] == "001"
+        assert logs[0]["name"] == "Mock"
+        assert logs[1]["event"] == "002"
+        assert logs[1]["name"] == "Name"
