@@ -65,7 +65,6 @@ class IAlarm:
             error_message = "Connection to the alarm system failed"
             raise ConnectionError(error_message) from err
         except Exception as err:
-            # Gestisce eventuali errori inattesi
             with contextlib.suppress(OSError):
                 if self.sock:
                     self.sock.close()
