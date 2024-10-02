@@ -252,7 +252,7 @@ class IAlarm:
         if status in {self.ARMED_AWAY, self.ARMED_STAY}:
             zone_status: list[ZoneStatusType] = await self.get_zone_status()
             zone_alarm = any(
-                StatusType.ZONE_ALARM in zone["types"] for zone in zone_status
+                StatusType.ZONE_ALARM in zone["Types"] for zone in zone_status
             )
 
             if zone_alarm:
