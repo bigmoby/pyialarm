@@ -6,7 +6,10 @@ setup(
     name="pyialarm",
     py_modules=["pyialarm"],
     version=__version__,
-    description="A simple library to interface with iAlarm systems, built for use with Home-Assistant",
+    description=(
+        "A simple library to interface with iAlarm systems, built for use with"
+        " Home-Assistant"
+    ),
     author="Ludovico de Nittis",
     author_email="aasonykk+pyialarm@gmail.com",
     url="https://github.com/RyuzakiKK/pyialarm",

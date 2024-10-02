@@ -1,15 +1,15 @@
 """Constants for iAlarm Home Assistant Integration."""
 
-from typing import TypedDict
 from datetime import datetime
 from enum import Enum, IntEnum
+from typing import TypedDict
 
 
 class LogEntryType(TypedDict):
-    time: datetime
-    area: int
-    event: str
-    name: str
+    Time: datetime
+    Area: int
+    Event: str
+    Name: str
 
 
 EVENT_TYPE_MAP = {
@@ -89,8 +89,9 @@ class StatusType(IntEnum):
 
 
 class ZoneStatusType(TypedDict):
-    zone_id: int
-    types: list[StatusType]
+    Zone_id: int
+    Name: str
+    Types: list[StatusType]
 
 
 class ZoneTypeEnum(str, Enum):
@@ -146,8 +147,8 @@ ALARM_TYPE_MAP = {
 
 
 class ZoneType(TypedDict):
-    zone_id: int
-    type: int
-    voice: int
-    name: str
-    bell: bool
+    Zone_id: int
+    Type: int
+    Voice: int
+    Name: str
+    Bell: bool

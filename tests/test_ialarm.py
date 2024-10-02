@@ -1,14 +1,18 @@
+# mypy: ignore-errors
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
-from pyialarm import IAlarm
+
 from pyialarm.const import StatusType
+from pyialarm.pyialarm import IAlarm
 
 
 @pytest.mark.asyncio
 async def test_ensure_connection_is_open():
-    with patch("socket.socket") as mock_socket, patch(
-        "asyncio.get_event_loop"
-    ) as mock_event_loop:
+    with (
+        patch("socket.socket") as mock_socket,
+        patch("asyncio.get_running_loop") as mock_event_loop,
+    ):
         mock_socket_instance = MagicMock()
         mock_socket.return_value = mock_socket_instance
         mock_socket_instance.fileno.return_value = -1
@@ -23,8 +27,32 @@ async def test_ensure_connection_is_open():
 
         mock_socket_instance.setblocking.assert_called_once_with(False)
         mock_event_loop_instance.sock_connect.assert_awaited_once_with(
-            mock_socket_instance, ("192.168.1.81", 18034)
+            mock_socket_instance, ("192.168.1.81", ialarm.port)
         )
+
+
+@pytest.mark.asyncio
+async def test_ensure_connection_is_open_handles_exceptions():
+    with (
+        patch("socket.socket") as mock_socket,
+        patch("asyncio.get_running_loop") as mock_event_loop,
+        patch("contextlib.suppress"),
+    ):
+        mock_socket_instance = MagicMock()
+        mock_socket.return_value = mock_socket_instance
+        mock_socket_instance.fileno.return_value = -1
+        mock_socket_instance.setblocking.side_effect = lambda x: None
+
+        mock_event_loop_instance = MagicMock()
+        mock_event_loop.return_value = mock_event_loop_instance
+        mock_event_loop_instance.sock_connect = AsyncMock(side_effect=TimeoutError)
+
+        ialarm = IAlarm("192.168.1.81")
+
+        with pytest.raises(ConnectionError):
+            await ialarm.ensure_connection_is_open()
+
+        mock_socket_instance.close.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -37,8 +65,10 @@ async def test_receive():
         mock_socket_instance.setblocking.side_effect = lambda x: None
         ialarm.sock = mock_socket_instance
 
-        with patch("asyncio.get_event_loop") as mock_event_loop:
+        # Patch di asyncio.get_running_loop invece di asyncio.get_event_loop
+        with patch("asyncio.get_running_loop") as mock_event_loop:
             mock_event_loop_instance = mock_event_loop.return_value
+            # Mock per la ricezione di dati dal socket
             mock_event_loop_instance.sock_recv = AsyncMock(
                 return_value=b"@ieM00020000<Root><Data>Mocked XML Data</Data></Root>"
             )
@@ -52,11 +82,12 @@ async def test_receive():
                 response = await ialarm._receive()
                 mock_xor.assert_called_once()
 
+                # Asserzione sulla risposta decodificata
                 assert response == {"Root": {"Data": "Mocked XML Data"}}
 
 
 @pytest.mark.parametrize(
-    "response, path, expected",
+    ("response", "path", "expected"),
     [
         ({"Root": {"Host": {"DevStatus": "0"}}}, "/Root/Host/DevStatus", "0"),
         (
@@ -171,8 +202,8 @@ async def test_get_zone_status_success():
 
     ialarm.get_zone = AsyncMock(
         return_value=[
-            {"zone_id": 1, "name": "Zone 1", "type": 1, "voice": 0, "bell": False},
-            {"zone_id": 2, "name": "Zone 2", "type": 1, "voice": 0, "bell": False},
+            {"Zone_id": 1, "Name": "Zone 1", "Type": 1, "Voice": 0, "Bell": False},
+            {"Zone_id": 2, "Name": "Zone 2", "Type": 1, "Voice": 0, "Bell": False},
         ]
     )
 
@@ -185,11 +216,11 @@ async def test_get_zone_status_success():
 
     expected_result = [
         {
-            "zone_id": 1,
-            "name": "Zone 1",
-            "types": [StatusType.ZONE_IN_USE, StatusType.ZONE_ALARM],
+            "Zone_id": 1,
+            "Name": "Zone 1",
+            "Types": [StatusType.ZONE_IN_USE, StatusType.ZONE_ALARM],
         },
-        {"zone_id": 2, "name": "Zone 2", "types": [StatusType.ZONE_BYPASS]},
+        {"Zone_id": 2, "Name": "Zone 2", "Types": [StatusType.ZONE_BYPASS]},
     ]
 
     result = await ialarm.get_zone_status()
@@ -214,7 +245,7 @@ async def test_get_zone_status_connection_error():
 
     ialarm.get_zone = AsyncMock(
         return_value=[
-            {"zone_id": 1, "name": "Zone 1"},
+            {"Zone_id": 1, "Name": "Zone 1"},
         ]
     )
 
@@ -232,14 +263,14 @@ async def test_get_zone_status_no_status():
 
     ialarm.get_zone = AsyncMock(
         return_value=[
-            {"zone_id": 1, "name": "Zone 1"},
+            {"Zone_id": 1, "Name": "Zone 1"},
         ]
     )
 
     ialarm._send_request_list = AsyncMock(return_value=[0])
 
     expected_result = [
-        {"zone_id": 1, "name": "Zone 1", "types": [StatusType.ZONE_NOT_USED]},
+        {"Zone_id": 1, "Name": "Zone 1", "Types": [StatusType.ZONE_NOT_USED]},
     ]
 
     result = await ialarm.get_zone_status()

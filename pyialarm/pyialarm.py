@@ -1,22 +1,25 @@
-import logging
+import asyncio
+from collections import OrderedDict
+import contextlib
 from datetime import datetime
+import logging
 import re
 import socket
-from collections import OrderedDict
-import asyncio
+from typing import Any, Optional
+
 import dicttoxml2
 import xmltodict
-from typing import List
-from pyialarm.const import (
-    LogEntryType,
+
+from .const import (
+    ALARM_TYPE_MAP,
     EVENT_TYPE_MAP,
+    ZONE_TYPE_MAP,
+    LogEntryType,
+    SirenSoundTypeEnum,
     StatusType,
     ZoneStatusType,
-    ZoneTypeEnum,
-    SirenSoundTypeEnum,
-    ZONE_TYPE_MAP,
-    ALARM_TYPE_MAP,
     ZoneType,
+    ZoneTypeEnum,
 )
 
 log = logging.getLogger(__name__)
@@ -24,10 +27,8 @@ log = logging.getLogger(__name__)
 logging.getLogger("dicttoxml").setLevel(logging.CRITICAL)
 
 
-class IAlarm(object):
-    """
-    Interface the iAlarm security systems.
-    """
+class IAlarm:
+    """Interface the iAlarm security systems."""
 
     ARMED_AWAY = 0
     DISARMED = 1
@@ -36,8 +37,7 @@ class IAlarm(object):
     TRIGGERED = 4
 
     def __init__(self, host, port=18034):
-        """
-        :param host: host of the iAlarm security system (e.g. its IP address)
+        """:param host: host of the iAlarm security system (e.g. its IP address)
         :param port: port of the iAlarm security system (should be '18034')
         """
         self.host = host
@@ -54,57 +54,74 @@ class IAlarm(object):
 
         self.seq = 0
         try:
-            await asyncio.get_event_loop().sock_connect(
-                self.sock, (self.host, self.port)
-            )
-        except (asyncio.TimeoutError, OSError, ConnectionRefusedError) as err:
-            self.sock.close()
-            raise ConnectionError("Connection to the alarm system failed") from err
+            loop = asyncio.get_running_loop()
+            await loop.sock_connect(self.sock, (self.host, self.port))
+        except (TimeoutError, OSError, ConnectionRefusedError) as err:
+            with contextlib.suppress(OSError):
+                if self.sock:
+                    self.sock.close()
+            error_message = "Connection to the alarm system failed"
+            raise ConnectionError(error_message) from err
+        except Exception as err:
+            # Gestisce eventuali errori inattesi
+            with contextlib.suppress(OSError):
+                if self.sock:
+                    self.sock.close()
+            error_message = "An unexpected error occurred"
+            raise RuntimeError(error_message) from err
 
     def _close_connection(self) -> None:
         if self.sock and self.sock.fileno() != 1:
             self.sock.close()
 
     async def _receive(self):
+        def raise_connection_error(msg: str):
+            self.sock.close()
+            raise ConnectionError(msg)
+
         try:
-            loop = asyncio.get_event_loop()
+            if self.sock is None or self.sock.fileno() == -1:
+                raise_connection_error("Socket is not open")
+
+            self.sock.setblocking(False)
+            loop = asyncio.get_running_loop()
             data = await loop.sock_recv(self.sock, 1024)
 
-            log.debug(f"Raw data from socket: {data}")
+            if not data:
+                raise_connection_error("Connection error, received no reply")
 
-        except (asyncio.TimeoutError, OSError, ConnectionRefusedError) as err:
-            self.sock.close()
-            raise ConnectionError("Connection error") from err
+            payload = data[16:-4]
 
-        if not data:
-            self.sock.close()
-            raise ConnectionError("Connection error, received no reply")
+            decoded = (
+                self._xor(payload)
+                .decode(errors="ignore")
+                .replace("<Err>ERR|00</Err>", "")
+            )
+            log.debug("Decoded data: %s", decoded)
 
-        payload = data[16:-4]
-        log.debug(f"Extracted payload: {payload}")
+            if not decoded:
+                raise_connection_error("Connection error, received an unexpected reply")
 
-        decoded = (
-            self._xor(payload).decode(errors="ignore").replace("<Err>ERR|00</Err>", "")
-        )
-
-        log.debug(f"Decoded data: {decoded}")
-
-        if not decoded:
-            self.sock.close()
-            raise ConnectionError("Connection error, received an unexpected reply")
-
-        try:
             return xmltodict.parse(
                 decoded,
                 xml_attribs=False,
                 dict_constructor=dict,
                 postprocessor=self._xmlread,
             )
-        except Exception as e:
-            log.error(f"Error parsing XML: {decoded}")
-            raise e
 
-    async def _send_request_list(self, xpath, command, offset=0, partial_list=None):
+        except (TimeoutError, OSError, ConnectionRefusedError):
+            raise_connection_error("Connection error")
+        except Exception:
+            log.exception("Error parsing XML")
+            raise
+
+    async def _send_request_list(
+        self,
+        xpath: str,
+        command: OrderedDict[str, Optional[Any]],
+        offset: int = 0,
+        partial_list: Optional[list[Any]] = None,
+    ) -> list[Any]:
         if offset > 0:
             command["Offset"] = "S32,0,0|%d" % offset
         root_dict = self._create_root_dict(xpath, command)
@@ -113,8 +130,8 @@ class IAlarm(object):
 
         if partial_list is None:
             partial_list = []
-        total = self._clean_response_dict(response, "%s/Total" % xpath)
-        ln = self._clean_response_dict(response, "%s/Ln" % xpath)
+        total = self._clean_response_dict(response, f"{xpath}/Total")
+        ln = self._clean_response_dict(response, f"{xpath}/Ln")
         for i in list(range(ln)):
             partial_list.append(
                 self._clean_response_dict(response, "%s/L%d" % (xpath, i))
@@ -125,7 +142,9 @@ class IAlarm(object):
 
         return partial_list
 
-    async def _send_request(self, xpath, command) -> dict:
+    async def _send_request(
+        self, xpath: str, command: dict[str, Any]
+    ) -> dict[str, Any]:
         root_dict = self._create_root_dict(xpath, command)
         await self._send_dict(root_dict)
         response = await self._receive()
@@ -134,7 +153,7 @@ class IAlarm(object):
 
     async def get_mac(self) -> str:
         mac = ""
-        command = OrderedDict()
+        command: OrderedDict[str, Optional[Any]] = OrderedDict()
         command["Mac"] = None
         command["Name"] = None
         command["Ip"] = None
@@ -150,23 +169,23 @@ class IAlarm(object):
 
         if mac:
             return mac
-        else:
-            raise ConnectionError(
-                "An error occurred trying to connect to the alarm "
-                "system or received an unexpected reply"
-            )
+        error_message = (
+            "An error occurred trying to connect to the alarm system or received an"
+            " unexpected reply"
+        )
+        raise ConnectionError(error_message)
 
-    def get_last_log_entries(self, log: List[LogEntryType]) -> List[LogEntryType]:
-        if not log:
+    def get_last_log_entries(self, log_list: list[LogEntryType]) -> list[LogEntryType]:
+        if not log_list:
             return []
-        return log[:25]
+        return log_list[:25]
 
     async def get_zone_status(self) -> list[ZoneStatusType]:
         zones: list[ZoneType] = await self.get_zone()
 
-        zone_name_map = {zone["zone_id"]: zone["name"] for zone in zones}
+        zone_name_map = {zone["Zone_id"]: zone["Name"] for zone in zones}
 
-        command: dict = OrderedDict()
+        command: OrderedDict[str, Optional[Any]] = OrderedDict()
         command["Total"] = None
         command["Offset"] = "S32,0,0|0"
         command["Ln"] = None
@@ -176,9 +195,8 @@ class IAlarm(object):
         )
 
         if zone_status is None:
-            raise ConnectionError(
-                "An error occurred trying to connect to the alarm system"
-            )
+            error_message = "An error occurred trying to connect to the alarm system"
+            raise ConnectionError(error_message)
 
         result = []
         for i, status in enumerate(zone_status):
@@ -205,52 +223,51 @@ class IAlarm(object):
             zone_name = zone_name_map.get(zone_id, "Unknown")
 
             zone_item: ZoneStatusType = {
-                "zone_id": zone_id,
-                "name": zone_name,
-                "types": status_list,
+                "Zone_id": zone_id,
+                "Name": zone_name,
+                "Types": status_list,
             }
             result.append(zone_item)
 
         return result
 
     async def get_status(self) -> int:
-        command = OrderedDict()
+        command: OrderedDict[str, Optional[Any]] = OrderedDict()
         command["DevStatus"] = None
         command["Err"] = None
 
-        alarm_status: dict = await self._send_request(
+        alarm_status: dict[str, Any] = await self._send_request(
             "/Root/Host/GetAlarmStatus", command
         )
 
         if alarm_status is None:
-            raise ConnectionError(
-                "An error occurred trying to connect to the alarm system"
-            )
+            error_message = "An error occurred trying to connect to the alarm system"
+            raise ConnectionError(error_message)
 
         status = int(alarm_status.get("DevStatus", -1))
         if status == -1:
-            raise ConnectionError("Received an unexpected reply from the alarm")
+            error_message = "Received an unexpected reply from the alarm"
+            raise ConnectionError(error_message)
 
-        zone_status: list[ZoneStatusType] = await self.get_zone_status()
-        zone_alarm = False
+        if status in {self.ARMED_AWAY, self.ARMED_STAY}:
+            zone_status: list[ZoneStatusType] = await self.get_zone_status()
+            zone_alarm = any(
+                StatusType.ZONE_ALARM in zone["types"] for zone in zone_status
+            )
 
-        for zone in zone_status:
-            if StatusType.ZONE_ALARM in zone["types"]:
-                zone_alarm = True
-
-        if (status == self.ARMED_AWAY or status == self.ARMED_STAY) and zone_alarm:
-            return self.TRIGGERED
+            if zone_alarm:
+                return self.TRIGGERED
 
         return status
 
-    async def get_log(self) -> List[LogEntryType]:
-        command = OrderedDict()
+    async def get_log(self) -> list[LogEntryType]:
+        command: OrderedDict[str, Optional[Any]] = OrderedDict()
         command["Total"] = None
         command["Offset"] = "S32,0,0|0"
         command["Ln"] = None
         command["Err"] = None
 
-        event_log: List[LogEntryType] = await self._send_request_list(
+        event_log: list[Any] = await self._send_request_list(
             "/Root/Host/GetLog", command
         )
 
@@ -276,7 +293,7 @@ class IAlarm(object):
 
         return event_log
 
-    def __extract_zones(self, zone_data: list) -> list[ZoneType]:
+    def __extract_zones(self, zone_data: list[ZoneType]) -> list[ZoneType]:
         zones = []
         for i, zone in enumerate(zone_data, start=1):
             name_decoded = ""
@@ -287,19 +304,18 @@ class IAlarm(object):
                     )
                 except (ValueError, IndexError):
                     name_decoded = zone["Name"]
-            bell_value = True if zone["Bell"] == "BOL|T" else False
             zone_item = ZoneType(
-                zone_id=i,
-                type=zone["Type"],
-                voice=zone["Voice"],
-                name=name_decoded,
-                bell=bell_value,
+                Zone_id=i,
+                Type=zone["Type"],
+                Voice=zone["Voice"],
+                Name=name_decoded,
+                Bell=zone["Bell"],
             )
             zones.append(zone_item)
         return zones
 
     async def get_zone(self) -> list[ZoneType]:
-        command = OrderedDict()
+        command: OrderedDict[str, Optional[Any]] = OrderedDict()
         command["Total"] = None
         command["Offset"] = "S32,0,0|0"
         command["Ln"] = None
@@ -311,8 +327,8 @@ class IAlarm(object):
 
         return zone
 
-    async def get_zone_type(self) -> List[ZoneTypeEnum]:
-        command = OrderedDict()
+    async def get_zone_type(self) -> list[ZoneTypeEnum]:
+        command: OrderedDict[str, Optional[Any]] = OrderedDict()
         command["Total"] = None
         command["Offset"] = "S32,0,0|0"
         command["Ln"] = None
@@ -327,8 +343,8 @@ class IAlarm(object):
 
         return zone_types
 
-    async def get_alarm_type(self) -> List[ZoneType]:
-        command = OrderedDict()
+    async def get_alarm_type(self) -> list[SirenSoundTypeEnum]:
+        command: OrderedDict[str, Optional[Any]] = OrderedDict()
         command["Total"] = None
         command["Offset"] = "S32,0,0|0"
         command["Ln"] = None
@@ -345,25 +361,25 @@ class IAlarm(object):
         return zone_types
 
     async def arm_away(self) -> None:
-        command = OrderedDict()
+        command: OrderedDict[str, Optional[Any]] = OrderedDict()
         command["DevStatus"] = "TYP,ARM|0"
         command["Err"] = None
         await self._send_request("/Root/Host/SetAlarmStatus", command)
 
     async def arm_stay(self) -> None:
-        command = OrderedDict()
+        command: OrderedDict[str, Optional[Any]] = OrderedDict()
         command["DevStatus"] = "TYP,STAY|2"
         command["Err"] = None
         await self._send_request("/Root/Host/SetAlarmStatus", command)
 
     async def disarm(self) -> None:
-        command = OrderedDict()
+        command: OrderedDict[str, Optional[Any]] = OrderedDict()
         command["DevStatus"] = "TYP,DISARM|1"
         command["Err"] = None
         await self._send_request("/Root/Host/SetAlarmStatus", command)
 
     async def cancel_alarm(self) -> None:
-        command = OrderedDict()
+        command: OrderedDict[str, Optional[Any]] = OrderedDict()
         command["DevStatus"] = "TYP,CLEAR|3"
         command["Err"] = None
         await self._send_request("/Root/Host/SetAlarmStatus", command)
@@ -375,7 +391,9 @@ class IAlarm(object):
 
         self.seq += 1
         msg = b"@ieM%04d%04d0000%s%04d" % (len(xml), self.seq, self._xor(xml), self.seq)
-        await asyncio.get_event_loop().sock_sendall(self.sock, msg)
+
+        loop = asyncio.get_running_loop()
+        await loop.sock_sendall(self.sock, msg)
 
     @staticmethod
     def _xmlread(_path, key, value):
@@ -436,5 +454,4 @@ class IAlarm(object):
             ki = i & 0x7F
             buf[i] = buf[i] ^ sz[ki]
 
-        log.debug(f"XOR result: {buf.decode(errors='ignore')}")
         return buf
