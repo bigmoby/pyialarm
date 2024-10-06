@@ -6,6 +6,7 @@ class IAlarmSocketNotOpenError(ConnectionError):
     def __init__(self):
         super().__init__("Socket is not open")
 
+
 class IAlarmConnectionError(ConnectionError):
     """Exception raised when socket is not open."""
 

@@ -47,10 +47,11 @@ class IAlarm:
         self.seq = 0
         self.sock = None
 
-    async def ensure_connection_is_open(self) -> None:
-        self._ensure_socket_is_open()
+    def _is_socket_open(self) -> bool:
+        return self.sock is not None and self.sock.fileno() != -1
 
-        if self.sock is None or self.sock.fileno() == -1:
+    async def ensure_connection_is_open(self) -> None:
+        if not self._is_socket_open():
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.setblocking(False)
 
@@ -67,10 +68,6 @@ class IAlarm:
         else:
             log.debug("Socket is already connected.")
 
-    def _ensure_socket_is_open(self) -> None:
-        if self.sock is None or self.sock.fileno() == -1:
-            self._close_connection()
-
     def _close_connection(self) -> None:
         if self.sock and self.sock.fileno() != -1:
             self.sock.close()
@@ -80,7 +77,8 @@ class IAlarm:
             self._close_connection()
             raise ConnectionError(msg)
 
-        self._ensure_socket_is_open()
+        if not self._is_socket_open():
+            raise_connection_error("Socket is not open")
 
         try:
             self.sock.setblocking(False)
@@ -120,18 +118,16 @@ class IAlarm:
     ) -> list[Any]:
         if offset > 0:
             command["Offset"] = "S32,0,0|%d" % offset
-        root_dict = self._create_root_dict(xpath, command)
+        root_dict: dict[str, Any] = self._create_root_dict(xpath, command)
         await self._send_dict(root_dict)
-        response = await self._receive()
+        response: dict[str, Any] = await self._receive()
 
         if partial_list is None:
             partial_list = []
-        total = self._clean_response_dict(response, f"{xpath}/Total")
-        ln = self._clean_response_dict(response, f"{xpath}/Ln")
-        for i in list(range(ln)):
-            partial_list.append(
-                self._clean_response_dict(response, "%s/L%d" % (xpath, i))
-            )
+        total: int = self._clean_response_dict(response, f"{xpath}/Total")
+        ln: int = self._clean_response_dict(response, f"{xpath}/Ln")
+        for i in range(ln):
+            partial_list.append(self._clean_response_dict(response, f"{xpath}/L{i}"))
         offset += ln
         if total > offset:
             await self._send_request_list(xpath, command, offset, partial_list)
@@ -139,7 +135,7 @@ class IAlarm:
         return partial_list
 
     async def _send_request(
-        self, xpath: str, command: dict[str, Any]
+        self, xpath: str, command: OrderedDict[str, Optional[Any]]
     ) -> dict[str, Any]:
         root_dict = self._create_root_dict(xpath, command)
         await self._send_dict(root_dict)
