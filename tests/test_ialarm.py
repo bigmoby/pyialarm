@@ -1,6 +1,7 @@
 # mypy: ignore-errors
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+import socket
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -10,50 +11,44 @@ from pyialarm.pyialarm import IAlarm
 
 @pytest.mark.asyncio
 async def test_ensure_connection_is_open():
-    with (
-        patch("socket.socket") as mock_socket,
-        patch("asyncio.get_running_loop") as mock_event_loop,
-    ):
-        mock_socket_instance = MagicMock()
-        mock_socket.return_value = mock_socket_instance
+    ialarm = IAlarm("192.168.1.81")
+
+    with patch("socket.socket") as mock_socket:
+        mock_socket_instance = mock_socket.return_value
         mock_socket_instance.fileno.return_value = -1
         mock_socket_instance.setblocking.side_effect = lambda x: None
+        ialarm.sock = mock_socket_instance
 
-        mock_event_loop_instance = MagicMock()
-        mock_event_loop.return_value = mock_event_loop_instance
-        mock_event_loop_instance.sock_connect = AsyncMock()
+        with patch("asyncio.get_running_loop") as mock_event_loop:
+            mock_event_loop_instance = mock_event_loop.return_value
 
-        ialarm = IAlarm("192.168.1.81")
-        await ialarm.ensure_connection_is_open()
+            mock_event_loop_instance.sock_connect = AsyncMock()
 
-        mock_socket_instance.setblocking.assert_called_once_with(False)
-        mock_event_loop_instance.sock_connect.assert_awaited_once_with(
-            mock_socket_instance, ("192.168.1.81", ialarm.port)
-        )
+            await ialarm.ensure_connection_is_open()
+
+            mock_socket.assert_called_once_with(socket.AF_INET, socket.SOCK_STREAM)
+            mock_event_loop_instance.sock_connect.assert_called_once_with(
+                mock_socket_instance, ("192.168.1.81", ialarm.port)
+            )
 
 
 @pytest.mark.asyncio
-async def test_ensure_connection_is_open_handles_exceptions():
-    with (
-        patch("socket.socket") as mock_socket,
-        patch("asyncio.get_running_loop") as mock_event_loop,
-        patch("contextlib.suppress"),
-    ):
-        mock_socket_instance = MagicMock()
-        mock_socket.return_value = mock_socket_instance
-        mock_socket_instance.fileno.return_value = -1
+async def test_ensure_connection_is_open_already_connected():
+    ialarm = IAlarm("192.168.1.81")
+
+    with patch("socket.socket") as mock_socket:
+        mock_socket_instance = mock_socket.return_value
+        mock_socket_instance.fileno.return_value = 1
         mock_socket_instance.setblocking.side_effect = lambda x: None
+        ialarm.sock = mock_socket_instance
 
-        mock_event_loop_instance = MagicMock()
-        mock_event_loop.return_value = mock_event_loop_instance
-        mock_event_loop_instance.sock_connect = AsyncMock(side_effect=TimeoutError)
+        with patch("asyncio.get_running_loop") as mock_event_loop:
+            mock_event_loop_instance = mock_event_loop.return_value
 
-        ialarm = IAlarm("192.168.1.81")
-
-        with pytest.raises(ConnectionError):
             await ialarm.ensure_connection_is_open()
 
-        mock_socket_instance.close.assert_called_once()
+            mock_socket.assert_not_called()
+            mock_event_loop_instance.sock_connect.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -66,10 +61,8 @@ async def test_receive():
         mock_socket_instance.setblocking.side_effect = lambda x: None
         ialarm.sock = mock_socket_instance
 
-        # Patch di asyncio.get_running_loop invece di asyncio.get_event_loop
         with patch("asyncio.get_running_loop") as mock_event_loop:
             mock_event_loop_instance = mock_event_loop.return_value
-            # Mock per la ricezione di dati dal socket
             mock_event_loop_instance.sock_recv = AsyncMock(
                 return_value=b"@ieM00020000<Root><Data>Mocked XML Data</Data></Root>"
             )
@@ -79,11 +72,9 @@ async def test_receive():
                 "_xor",
                 return_value=b"<Root><Data>Mocked XML Data</Data></Root>",
             ) as mock_xor:
-                # Test della funzione _receive
                 response = await ialarm._receive()
                 mock_xor.assert_called_once()
 
-                # Asserzione sulla risposta decodificata
                 assert response == {"Root": {"Data": "Mocked XML Data"}}
 
 

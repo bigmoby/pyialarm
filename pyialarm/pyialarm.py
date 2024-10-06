@@ -1,6 +1,5 @@
 import asyncio
 from collections import OrderedDict
-import contextlib
 import logging
 import re
 import socket
@@ -22,6 +21,7 @@ from pyialarm.const import (
     ZoneTypeEnum,
     ZoneTypeRaw,
 )
+from pyialarm.exception import IAlarmConnectionError
 from pyialarm.util import decode_name, parse_bell, parse_time
 
 log = logging.getLogger(__name__)
@@ -48,42 +48,41 @@ class IAlarm:
         self.sock = None
 
     async def ensure_connection_is_open(self) -> None:
+        self._ensure_socket_is_open()
+
         if self.sock is None or self.sock.fileno() == -1:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.setblocking(False)
-        else:
-            return
 
-        self.seq = 0
-        try:
+            self.seq = 0
             loop = asyncio.get_running_loop()
-            await loop.sock_connect(self.sock, (self.host, self.port))
-        except (TimeoutError, OSError, ConnectionRefusedError) as err:
-            with contextlib.suppress(OSError):
-                if self.sock:
-                    self.sock.close()
-            error_message = "Connection to the alarm system failed"
-            raise ConnectionError(error_message) from err
-        except Exception as err:
-            with contextlib.suppress(OSError):
-                if self.sock:
-                    self.sock.close()
-            error_message = "An unexpected error occurred"
-            raise RuntimeError(error_message) from err
+            try:
+                await loop.sock_connect(self.sock, (self.host, self.port))
+            except (TimeoutError, OSError, ConnectionRefusedError) as err:
+                self._close_connection()
+                raise IAlarmConnectionError from err
+            except Exception:
+                self._close_connection()
+                raise
+        else:
+            log.debug("Socket is already connected.")
+
+    def _ensure_socket_is_open(self) -> None:
+        if self.sock is None or self.sock.fileno() == -1:
+            self._close_connection()
 
     def _close_connection(self) -> None:
-        if self.sock and self.sock.fileno() != 1:
+        if self.sock and self.sock.fileno() != -1:
             self.sock.close()
 
     async def _receive(self):
         def raise_connection_error(msg: str):
-            self.sock.close()
+            self._close_connection()
             raise ConnectionError(msg)
 
-        try:
-            if self.sock is None or self.sock.fileno() == -1:
-                raise_connection_error("Socket is not open")
+        self._ensure_socket_is_open()
 
+        try:
             self.sock.setblocking(False)
             loop = asyncio.get_running_loop()
             data = await loop.sock_recv(self.sock, 1024)
@@ -91,30 +90,26 @@ class IAlarm:
             if not data:
                 raise_connection_error("Connection error, received no reply")
 
-            payload = data[16:-4]
-
-            decoded = (
-                self._xor(payload)
-                .decode(errors="ignore")
-                .replace("<Err>ERR|00</Err>", "")
-            )
-            log.debug("Decoded data: %s", decoded)
-
-            if not decoded:
-                raise_connection_error("Connection error, received an unexpected reply")
-
-            return xmltodict.parse(
-                decoded,
-                xml_attribs=False,
-                dict_constructor=dict,
-                postprocessor=self._xmlread,
-            )
-
-        except (TimeoutError, OSError, ConnectionRefusedError):
-            raise_connection_error("Connection error")
         except Exception:
-            log.exception("Error parsing XML")
+            self._close_connection()
             raise
+
+        payload = data[16:-4]
+        decoded = (
+            self._xor(payload).decode(errors="ignore").replace("<Err>ERR|00</Err>", "")
+        )
+
+        log.debug("Decoded data: %s", decoded)
+
+        if not decoded:
+            raise_connection_error("Connection error, received an unexpected reply")
+
+        return xmltodict.parse(
+            decoded,
+            xml_attribs=False,
+            dict_constructor=dict,
+            postprocessor=self._xmlread,
+        )
 
     async def _send_request_list(
         self,
@@ -176,10 +171,11 @@ class IAlarm:
         )
         raise ConnectionError(error_message)
 
-    def get_last_log_entries(self, log_list: list[LogEntryType]) -> list[LogEntryType]:
+    async def get_last_log_entries(self, max_entries: int = 25) -> list[LogEntryType]:
+        log_list = await self.get_log()
         if not log_list:
             return []
-        return log_list[:25]
+        return log_list[:max_entries]
 
     async def get_zone_status(self) -> list[ZoneStatusType]:
         zones: list[ZoneType] = await self.get_zone()
